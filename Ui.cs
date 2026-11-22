@@ -8,7 +8,13 @@ public static class Ui
     private static readonly object Sync = new();
     private static readonly ConsoleColor DefaultColor = Console.ForegroundColor;
 
-    private static void Write(ConsoleColor color, string text)
+    public static bool AsciiMode { get; private set; }
+
+    public static void ConfigureAscii(bool enabled) => AsciiMode = enabled;
+
+    private static string T(string text) => AsciiMode ? Text.ToAscii(text) : text;
+
+    private static void WriteCore(ConsoleColor color, string text)
     {
         lock (Sync)
         {
@@ -19,13 +25,15 @@ public static class Ui
         }
     }
 
+    private static void Write(ConsoleColor color, string text) => WriteCore(color, T(text));
+
     public static void Raw(string text = "") => Write(DefaultColor, text);
     public static void Info(string text) => Write(ConsoleColor.DarkGray, "- " + text);
-    public static void Ok(string text) => Write(ConsoleColor.Green, "✓ " + text);
-    public static void Warn(string text) => Write(ConsoleColor.Yellow, "! " + text);
-    public static void Err(string text) => Write(ConsoleColor.Red, "✗ " + text);
+    public static void Ok(string text) => Write(ConsoleColor.Green, (AsciiMode ? "[OK] " : "✓ ") + text);
+    public static void Warn(string text) => Write(ConsoleColor.Yellow, (AsciiMode ? "[!] " : "! ") + text);
+    public static void Err(string text) => Write(ConsoleColor.Red, (AsciiMode ? "[ERR] " : "✗ ") + text);
     public static void Command(string text) => Write(ConsoleColor.DarkCyan, "$ " + text);
-    public static void Stream(string line, bool isError) => Write(isError ? ConsoleColor.Red : DefaultColor, line);
+    public static void Stream(string line, bool isError) => WriteCore(isError ? ConsoleColor.Red : DefaultColor, line);
 
     public static void Header(string text)
     {
@@ -34,7 +42,7 @@ public static class Ui
             var old = Console.ForegroundColor;
             Console.ForegroundColor = ConsoleColor.Cyan;
             Console.WriteLine();
-            Console.WriteLine("=============== " + text + " ===============");
+            Console.WriteLine("=============== " + T(text) + " ===============");
             Console.ForegroundColor = old;
         }
     }
@@ -46,7 +54,7 @@ public static class Ui
             var old = Console.ForegroundColor;
             Console.ForegroundColor = ConsoleColor.Cyan;
             Console.WriteLine();
-            Console.WriteLine("-- " + text + " --");
+            Console.WriteLine("-- " + T(text) + " --");
             Console.ForegroundColor = old;
         }
     }
@@ -54,9 +62,11 @@ public static class Ui
     public static string Ask(string label, string? def = null)
     {
         string? line;
+        var shownLabel = T(label);
+        var shownDefault = def is { Length: > 0 } ? T(def) : null;
         lock (Sync)
         {
-            Console.Write(def is { Length: > 0 } ? $"{label} [{def}]: " : $"{label}: ");
+            Console.Write(shownDefault is not null ? $"{shownLabel} [{shownDefault}]: " : $"{shownLabel}: ");
             line = Console.ReadLine();
         }
 
@@ -103,7 +113,7 @@ public static class Ui
     {
         if (Console.IsInputRedirected) return Ask(label);
 
-        lock (Sync) Console.Write(label + ": ");
+        lock (Sync) Console.Write(T(label) + ": ");
         var sb = new StringBuilder();
         while (true)
         {
@@ -144,7 +154,7 @@ public static class Ui
     public static void Pause(string text = "برای ادامه Enter بزنید")
     {
         if (Console.IsInputRedirected) return;
-        lock (Sync) Console.Write(text + " ...");
+        lock (Sync) Console.Write(T(text) + " ...");
         Console.ReadLine();
     }
 }

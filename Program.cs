@@ -1,16 +1,55 @@
 using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace Publisher;
 
 internal static class Program
 {
-    public const string AppVersion = "1.0.0";
+    public const string AppVersion = "1.1.0";
 
     private static async Task<int> Main(string[] args)
     {
-        try { Console.OutputEncoding = new UTF8Encoding(false); }
+        try
+        {
+            Console.OutputEncoding = new UTF8Encoding(false);
+            Console.InputEncoding = new UTF8Encoding(false);
+        }
         catch (IOException) { }
+        catch (System.Security.SecurityException) { }
+
+        if (OperatingSystem.IsWindows())
+        {
+            try
+            {
+                SetConsoleCP(65001);
+                SetConsoleOutputCP(65001);
+            }
+            catch (Exception)
+            {
+                // Not fatal: encoding was already requested through Console.
+            }
+        }
+
+        CliOptions options;
+        try
+        {
+            options = CliOptions.Parse(args);
+        }
+        catch (ToolException ex)
+        {
+            Ui.Err(ex.Message);
+            return 1;
+        }
+
+        var (ascii, autoDetected) = ResolveAsciiMode(options);
+        Ui.ConfigureAscii(ascii);
+        if (ascii)
+        {
+            Ui.Info("ASCII mode: Persian text is transliterated to Latin letters.");
+            if (autoDetected)
+                Ui.Info("This console cannot display Persian. Use a UTF-8 terminal (Windows Terminal, LANG=C.UTF-8) with --no-ascii to keep Persian.");
+        }
 
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) =>
@@ -25,7 +64,7 @@ internal static class Program
 
         try
         {
-            return await DispatchAsync(CliOptions.Parse(args), cts.Token).ConfigureAwait(false);
+            return await DispatchAsync(options, cts.Token).ConfigureAwait(false);
         }
         catch (UserCancelException)
         {
@@ -60,6 +99,12 @@ internal static class Program
         if (options.ShowHelp)
         {
             PrintHelp();
+            return 0;
+        }
+
+        if (options.ShowDiagnostics)
+        {
+            PrintDiagnostics();
             return 0;
         }
 
@@ -153,6 +198,127 @@ internal static class Program
         => !string.IsNullOrEmpty(value)
            && (value.Equals("on", StringComparison.OrdinalIgnoreCase) || value.Equals("off", StringComparison.OrdinalIgnoreCase));
 
+    private static (bool Enabled, bool AutoDetected) ResolveAsciiMode(CliOptions options)
+    {
+        if (options.AsciiOverride is { } forced) return (forced, false);
+
+        var env = Environment.GetEnvironmentVariable("PUBLISHER_ASCII");
+        if (!string.IsNullOrWhiteSpace(env))
+        {
+            var value = env.Trim().ToLowerInvariant();
+            var enabled = value is not ("0" or "false" or "no" or "off");
+            return (enabled, false);
+        }
+
+        return (ConsoleCannotRenderUnicode(), true);
+    }
+
+    private static bool ConsoleCannotRenderUnicode()
+        => LegacyConsoleUsesRasterFont() || WindowsLegacyConsole() || !CanRoundtripPersian();
+
+    private static bool WindowsLegacyConsole()
+        => OperatingSystem.IsWindows()
+           && !Console.IsOutputRedirected
+           && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WT_SESSION"))
+           && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("TERM_PROGRAM"));
+
+    private static bool CanRoundtripPersian()
+    {
+        try
+        {
+            var encoding = Console.OutputEncoding;
+            const string probe = "پچگژ";
+            return string.Equals(encoding.GetString(encoding.GetBytes(probe)), probe, StringComparison.Ordinal);
+        }
+        catch (Exception ex) when (ex is IOException or NotSupportedException or ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    private static bool LegacyConsoleUsesRasterFont()
+    {
+        if (!OperatingSystem.IsWindows() || Console.IsOutputRedirected) return false;
+        return string.Equals(ConsoleFontName(), "Terminal", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string? ConsoleFontName()
+    {
+        try
+        {
+            var info = new ConsoleFontInfo
+            {
+                Size = (uint)Marshal.SizeOf<ConsoleFontInfo>(),
+                FaceName = string.Empty,
+            };
+            return GetCurrentConsoleFontEx(GetStdHandle(-11), false, ref info) ? info.FaceName : null;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    private static void PrintDiagnostics()
+    {
+        static void P(string key, object? value) => Console.WriteLine(key + ": " + value);
+
+        P("publisher", AppVersion);
+        P("os", RuntimeInformation.OSDescription);
+        P("arch", RuntimeInformation.ProcessArchitecture + " on " + RuntimeInformation.OSArchitecture);
+        P("stdin_redirected", Console.IsInputRedirected);
+        P("stdout_redirected", Console.IsOutputRedirected);
+        P("stderr_redirected", Console.IsErrorRedirected);
+        P("output_encoding", Console.OutputEncoding.WebName + " (cp " + Console.OutputEncoding.CodePage + ")");
+        P("input_encoding", Console.InputEncoding.WebName + " (cp " + Console.InputEncoding.CodePage + ")");
+
+        if (OperatingSystem.IsWindows())
+        {
+            try { P("console_output_cp", GetConsoleOutputCP()); } catch (Exception) { P("console_output_cp", "n/a"); }
+            try { P("console_input_cp", GetConsoleCP()); } catch (Exception) { P("console_input_cp", "n/a"); }
+            P("console_font", ConsoleFontName() ?? "unknown");
+        }
+
+        P("WT_SESSION", Environment.GetEnvironmentVariable("WT_SESSION") ?? "");
+        P("LANG", Environment.GetEnvironmentVariable("LANG") ?? "");
+        P("LC_ALL", Environment.GetEnvironmentVariable("LC_ALL") ?? "");
+        P("TERM", Environment.GetEnvironmentVariable("TERM") ?? "");
+        P("PUBLISHER_ASCII", Environment.GetEnvironmentVariable("PUBLISHER_ASCII") ?? "");
+        P("persian_roundtrip", CanRoundtripPersian());
+        P("ascii_mode", Ui.AsciiMode);
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct ConsoleFontInfo
+    {
+        public uint Size;
+        public uint Font;
+        public ushort FontWidth;
+        public ushort FontHeight;
+        public uint FontFamily;
+        public uint FontWeight;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+        public string FaceName;
+    }
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetStdHandle(int handle);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool GetCurrentConsoleFontEx(IntPtr consoleOutput, bool maximumWindow, ref ConsoleFontInfo info);
+
+    [DllImport("kernel32.dll")]
+    private static extern bool SetConsoleCP(uint codePage);
+
+    [DllImport("kernel32.dll")]
+    private static extern bool SetConsoleOutputCP(uint codePage);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetConsoleCP();
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetConsoleOutputCP();
+
     private static void PrintHelp()
     {
         Ui.Raw("Publisher " + AppVersion + " — مدیریت انتشار نسخه‌ها روی سرور");
@@ -184,11 +350,15 @@ internal static class Program
         Ui.Raw("  --force           انتشار حتی اگر کامیت جدیدی نباشد");
         Ui.Raw("  --once            در حالت watch فقط یک بررسی انجام بده");
         Ui.Raw("  --interval <n>    فاصله بررسی در watch (دقیقه)");
+        Ui.Raw("  --ascii           نمایش متن فارسی با حروف لاتین (کنسول‌های بدون پشتیبانی فارسی)");
+        Ui.Raw("  --no-ascii        اجبار خروجی فارسی، حتی اگر کنسول ناتوان تشخیص داده شود");
+        Ui.Raw("  --diag            نمایش اطلاعات رمزگذاری و کنسول (همیشه لاتین)");
         Ui.Raw("  -h, --help        این راهنما");
         Ui.Raw("  -v, --version     نسخه برنامه");
         Ui.Raw("");
         Ui.Raw("متغیر محیطی:");
         Ui.Raw("  PUBLISHER_GIT_TOKEN   توکن گیت، وقتی در کانفیگ ذخیره نشده باشد");
+        Ui.Raw("  PUBLISHER_ASCII       1=خروجی لاتین، 0=خروجی فارسی همیشگی");
         Ui.Raw("");
         Ui.Raw("مسیر ~ و مسیرهای نسبی پشتیبانی می‌شوند. در فرمان پابلیش، مسیرهای دارای فاصله را در کوتیشن بگذارید.");
     }
@@ -206,6 +376,8 @@ internal sealed class CliOptions
     public int? IntervalMinutes { get; private set; }
     public bool ShowHelp { get; private set; }
     public bool ShowVersion { get; private set; }
+    public bool ShowDiagnostics { get; private set; }
+    public bool? AsciiOverride { get; private set; }
 
     public static CliOptions Parse(string[] args)
     {
@@ -229,6 +401,15 @@ internal sealed class CliOptions
                     break;
                 case "--once":
                     options.Once = true;
+                    break;
+                case "--ascii":
+                    options.AsciiOverride = true;
+                    break;
+                case "--no-ascii":
+                    options.AsciiOverride = false;
+                    break;
+                case "--diag":
+                    options.ShowDiagnostics = true;
                     break;
                 case "--interval":
                     if (i + 1 >= args.Length
